@@ -346,22 +346,64 @@ function syncRecognition() {
       if (/스마일|김치|촬영|찰칵/.test(t)) { state.lastTrigger = now; takePhoto(); return; }
     }
   };
-  rec.onerror = (e) => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { recWanted = false; log("마이크 권한이 필요해요"); } };
+  rec.onerror = (e) => {
+    const msgs = {
+      "not-allowed": MIC_HELP, "service-not-allowed": MIC_HELP,
+      "audio-capture": "마이크 장치를 찾지 못했어요",
+      "network": "음성 인식은 인터넷이 필요해요(연결 확인)",
+    };
+    if (msgs[e.error]) {
+      micNote(msgs[e.error]);
+      if (e.error !== "network") { recWanted = false; $("voice").checked = false; }
+    }
+  };
   rec.onend = () => { if (recWanted && !recPaused) setTimeout(() => { try { rec.start(); } catch {} }, 300); };
   try { rec.start(); } catch {}
 }
 
 // ---------- 시작 ----------
+// ---------- 마이크 권한 ----------
+const micNote = (t) => { $("said").textContent = "🎤 " + t; log("🎤 " + t); }; // 안내 음성 문구에 덮이지 않게 로그에도 남김
+const MIC_HELP = "마이크가 차단돼 있어요. Chrome 주소창 왼쪽 아이콘 → 권한(또는 사이트 설정) → 마이크 → 허용 후 새로고침. 그래도 안 되면 폰 설정 → 앱 → Chrome → 권한 → 마이크 허용. (음성 명령 없이 버튼으로는 계속 쓸 수 있어요)";
+async function requestMic() {
+  let st = "unknown";
+  try { st = (await navigator.permissions.query({ name: "microphone" })).state; } catch {}
+  if (st === "denied") return { ok: false, msg: MIC_HELP };
+  if (!navigator.mediaDevices?.getUserMedia) return { ok: false, msg: "이 브라우저는 마이크 접근을 지원하지 않아요" };
+  try {
+    // 권한 프롬프트를 띄우기 위해 잠깐 열었다 닫는다 (녹음하지 않음)
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach((t) => t.stop());
+    return { ok: true };
+  } catch (e) {
+    if (e?.name === "NotAllowedError" || e?.name === "SecurityError") return { ok: false, msg: MIC_HELP };
+    if (e?.name === "NotFoundError") return { ok: false, msg: "마이크 장치를 찾지 못했어요" };
+    return { ok: false, msg: "마이크 오류: " + (e?.name || e) };
+  }
+}
+async function enableVoice() {
+  const r = await requestMic();
+  if (r.ok) { $("voice").checked = true; store.set("voice", "1"); syncRecognition(); micNote("음성 명령 켜짐"); }
+  else { $("voice").checked = false; syncRecognition(); micNote(r.msg); }
+  return r.ok;
+}
+$("micRetry").onclick = enableVoice;
+
 $("start").onclick = async () => {
   $("start").disabled = true;
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("카메라 API 없음: HTTPS(또는 localhost)로 접속해야 해요");
+    // 마이크 권한은 클릭 직후(사용자 동작이 유효할 때) 먼저 요청한다. 거부돼도 카메라/음성 안내는 계속 진행.
+    const mic = $("voice").checked ? await requestMic() : { ok: false, msg: "" };
+    if (!mic.ok) { $("voice").checked = false; if (mic.msg) micNote(mic.msg); }
     await startCamera();
     await loadModel();
     state.running = true;
     $("start").style.display = "none";
-    log("준비 완료 (모델: " + state.modelInfo + ")");
+    if (!logEl.textContent.startsWith("🎤")) log("준비 완료 (모델: " + state.modelInfo + ")");
+    const said0 = $("said").textContent;
     speak("구도 도우미를 시작합니다");
+    if (said0.startsWith("🎤")) setTimeout(() => ($("said").textContent = said0), 300); // 마이크 안내가 덮이지 않게
     syncRecognition();
     requestAnimationFrame(loop);
   } catch (err) {
