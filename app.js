@@ -1,5 +1,5 @@
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { evaluate } from "./logic.js";
+import { evaluate } from "./logic.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), overlay = $("overlay"), ctx = overlay.getContext("2d");
@@ -17,6 +17,8 @@ for (const id of ["mode", "bg"]) { $(id).value = store.get(id, $(id).value); $(i
 for (const id of ["tts", "voice"]) { $(id).checked = store.get(id, "1") === "1"; $(id).onchange = () => { store.set(id, $(id).checked ? "1" : "0"); if (id === "voice") syncRecognition(); }; }
 
 const log = (t) => (logEl.textContent = t);
+window.addEventListener("error", (e) => log("오류: " + e.message));
+window.addEventListener("unhandledrejection", (e) => log("오류: " + (e.reason?.message || e.reason)));
 
 // ---------- 음성 안내 (TTS) ----------
 // 주의: 안내 문장에 명령어("촬영","스마일","김치","찰칵")를 넣지 않는다 → 자기 목소리로 셔터가 눌리는 것을 방지.
@@ -73,9 +75,11 @@ function setupZoom(track) {
     return;
   }
   const levels = [...new Set([cap.min, 0.5, 1, 2, 3, 5].filter((z) => z >= cap.min - 1e-6 && z <= cap.max + 1e-6).map((z) => +z.toFixed(1)))].sort((a, b) => a - b);
+  state.zoom = { track, min: cap.min, max: cap.max, cur: track.getSettings?.().zoom ?? 1 };
   const apply = async (z, btn) => {
     try {
       await track.applyConstraints({ advanced: [{ zoom: z }] });
+      state.zoom.cur = z;
       box.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === btn));
     } catch (e) { log("줌 적용 실패: " + (e?.message || e)); }
   };
@@ -158,6 +162,29 @@ function render(r, people) {
     const b = r.box;
     ctx.strokeRect(b.left * W, b.top * H, (b.right - b.left) * W, (b.bottom - b.top) * H);
   }
+}
+
+// ---------- 핀치 줌 (두 손가락) ----------
+{
+  const pts = new Map(); let d0 = 0, z0 = 1, busy = false;
+  const stage = $("stage");
+  const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button, #panel")) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2 && state.zoom) { d0 = dist(); z0 = state.zoom.cur; }
+  });
+  stage.addEventListener("pointermove", async (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size !== 2 || !state.zoom || busy || !d0) return;
+    const z = Math.min(state.zoom.max, Math.max(state.zoom.min, z0 * (dist() / d0)));
+    busy = true;
+    try { await state.zoom.track.applyConstraints({ advanced: [{ zoom: z }] }); state.zoom.cur = z; $("zoom").querySelectorAll("button").forEach((b) => b.classList.remove("on")); } catch {}
+    busy = false;
+  });
+  const up = (e) => { pts.delete(e.pointerId); d0 = 0; };
+  stage.addEventListener("pointerup", up); stage.addEventListener("pointercancel", up);
 }
 
 // ---------- 촬영 ----------
