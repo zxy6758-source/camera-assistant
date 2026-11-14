@@ -2,7 +2,19 @@ import { PoseLandmarker, ObjectDetector, FilesetResolver } from "https://cdn.jsd
 import { evaluate, Stabilizer, personBox, mergePeople, sortByX, smoothBoxes } from "./logic.js?v=10";
 const stab = new Stabilizer();
 
-const $ = (id) => document.getElementById(id);
+const VERSION = "11";
+// 없는 요소를 만나도 앱 전체가 멈추지 않도록 빈 요소를 돌려준다(오래된 HTML 캐시 대비)
+const $ = (id) => document.getElementById(id) ?? (console.warn("missing element: " + id), document.createElement("span"));
+
+// HTML과 스크립트 버전이 다르면(캐시 어긋남) 한 번만 캐시를 우회해 새로고침
+if (document.body.dataset.v !== VERSION) {
+  let tried = false;
+  try { tried = sessionStorage.getItem("reloaded-" + VERSION) === "1"; sessionStorage.setItem("reloaded-" + VERSION, "1"); } catch {}
+  const b = document.getElementById("banner");
+  if (b) b.textContent = "새 버전을 불러오는 중…";
+  if (!tried) location.replace(location.pathname + "?r=" + Date.now());
+  else if (b) b.textContent = "오래된 캐시예요. 브라우저 캐시를 지우고 다시 열어주세요 (v" + VERSION + " 필요)";
+}
 const video = $("video"), overlay = $("overlay"), ctx = overlay.getContext("2d");
 const banner = $("banner"), issuesEl = $("issues"), metricsEl = $("metrics"), logEl = $("log");
 
