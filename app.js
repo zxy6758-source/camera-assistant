@@ -1,5 +1,5 @@
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { evaluate } from "./logic.js?v=4";
+import { evaluate } from "./logic.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), overlay = $("overlay"), ctx = overlay.getContext("2d");
@@ -96,11 +96,33 @@ function setupZoom(track) {
 async function loadModel() {
   log("모델 불러오는 중… (처음 한 번, 네트워크 필요)");
   const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  const make = (delegate) => PoseLandmarker.createFromOptions(fileset, {
-    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", delegate },
+  const url = (size) => `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${size}/float16/1/pose_landmarker_${size}.task`;
+  const make = (size, delegate) => PoseLandmarker.createFromOptions(fileset, {
+    baseOptions: { modelAssetPath: url(size), delegate },
     runningMode: "VIDEO", numPoses: 4,
+    // 기본값(0.5)보다 낮춰 멀리 있거나 일부 가려진 사람도 놓치지 않게 함
+    minPoseDetectionConfidence: 0.3, minPosePresenceConfidence: 0.3, minTrackingConfidence: 0.3,
   });
-  try { state.landmarker = await make("GPU"); } catch { state.landmarker = await make("CPU"); }
+  // 정확도가 더 높은 full 모델 우선, 실패 시 GPU→CPU, 그래도 안 되면 lite
+  for (const [size, delegate] of [["full", "GPU"], ["full", "CPU"], ["lite", "CPU"]]) {
+    try { state.landmarker = await make(size, delegate); state.modelInfo = `${size}/${delegate}`; return; } catch {}
+  }
+  throw new Error("포즈 모델을 불러오지 못했어요");
+}
+
+// ---------- 안정화: 프레임 간 평활 + 순간 미검출 무시 ----------
+let prevPeople = [], lastSeen = 0;
+function smoothPeople(people, now) {
+  if (!people.length) {
+    if (prevPeople.length && now - lastSeen < 800) return prevPeople; // 0.8초 이내 끊김은 유지
+    prevPeople = []; return [];
+  }
+  lastSeen = now;
+  const a = 0.45; // 새 값 반영 비율
+  const out = prevPeople.length === people.length
+    ? people.map((p, k) => p.map((pt, i) => { const q = prevPeople[k][i]; return { x: a * pt.x + (1 - a) * q.x, y: a * pt.y + (1 - a) * q.y, visibility: pt.visibility }; }))
+    : people;
+  prevPeople = out; return out;
 }
 
 // ---------- 밝기(역광) ----------
@@ -129,7 +151,7 @@ function loop() {
   lastRun = now;
   const ts = Math.max(now, lastTs + 1); lastTs = ts;
   const res = state.landmarker.detectForVideo(video, ts);
-  const people = res.landmarks || [];
+  const people = smoothPeople(res.landmarks || [], now);
 
   let luma = null;
   if (people.length) {
@@ -157,6 +179,8 @@ function render(r, people) {
   ctx.clearRect(0, 0, W, H);
   ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke();
+  ctx.fillStyle = "rgba(0,200,255,.9)";
+  for (const p of people) for (const pt of p) if ((pt.visibility ?? 1) >= 0.35) { ctx.beginPath(); ctx.arc(pt.x * W, pt.y * H, 5, 0, 6.283); ctx.fill(); }
   if (r.box) {
     ctx.strokeStyle = r.level === "ok" ? "#2ecc71" : "#ff9f1a"; ctx.lineWidth = 6;
     const b = r.box;
@@ -268,7 +292,7 @@ $("start").onclick = async () => {
     await loadModel();
     state.running = true;
     $("start").style.display = "none";
-    log("준비 완료");
+    log("준비 완료 (모델: " + state.modelInfo + ")");
     speak("구도 도우미를 시작합니다");
     syncRecognition();
     requestAnimationFrame(loop);
