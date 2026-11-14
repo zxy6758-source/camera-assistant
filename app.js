@@ -1,5 +1,6 @@
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { evaluate } from "./logic.js?v=5";
+import { evaluate, Stabilizer } from "./logic.js?v=6";
+const stab = new Stabilizer();
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), overlay = $("overlay"), ctx = overlay.getContext("2d");
@@ -99,7 +100,7 @@ async function loadModel() {
   const url = (size) => `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${size}/float16/1/pose_landmarker_${size}.task`;
   const make = (size, delegate) => PoseLandmarker.createFromOptions(fileset, {
     baseOptions: { modelAssetPath: url(size), delegate },
-    runningMode: "VIDEO", numPoses: 4,
+    runningMode: "VIDEO", numPoses: 6,
     // 기본값(0.5)보다 낮춰 멀리 있거나 일부 가려진 사람도 놓치지 않게 함
     minPoseDetectionConfidence: 0.3, minPosePresenceConfidence: 0.3, minTrackingConfidence: 0.3,
   });
@@ -118,7 +119,7 @@ function smoothPeople(people, now) {
     prevPeople = []; return [];
   }
   lastSeen = now;
-  const a = 0.45; // 새 값 반영 비율
+  const a = 0.3; // 새 값 반영 비율(작을수록 부드러움)
   const out = prevPeople.length === people.length
     ? people.map((p, k) => p.map((pt, i) => { const q = prevPeople[k][i]; return { x: a * pt.x + (1 - a) * q.x, y: a * pt.y + (1 - a) * q.y, visibility: pt.visibility }; }))
     : people;
@@ -153,25 +154,28 @@ function loop() {
   const res = state.landmarker.detectForVideo(video, ts);
   const people = smoothPeople(res.landmarks || [], now);
 
+  const margin = stab.isOk ? 0.05 : 0; // 좋아요 상태에서는 기준을 5%p 넓혀 경계에서 깜빡이지 않게
+  const opts = { mode: $("mode").value, bg: $("bg").value, margin };
   let luma = null;
   if (people.length) {
-    const first = evaluate(people, { mode: $("mode").value, bg: $("bg").value });
+    const first = evaluate(people, opts);
     if (first.box) luma = lumaStats(first.box);
   }
-  const r = evaluate(people, { mode: $("mode").value, bg: $("bg").value, luma });
+  const r = stab.update(evaluate(people, { ...opts, luma }), Date.now());
   render(r, people);
   maybeSpeak(r.speak, Date.now());
 }
 
+const q5 = (v) => Math.round((v * 100) / 5) * 5; // 표시용: 5% 단위로 반올림해 숫자가 덜 흔들리게
 function render(r, people) {
   banner.className = r.level;
   banner.textContent = r.level === "ok" ? "✔ 구도 좋아요" : r.issues[0];
   issuesEl.replaceChildren(...(r.level === "ok" ? [] : r.issues.slice(1, 3).map((t) => Object.assign(document.createElement("li"), { textContent: t }))));
   const m = r.metrics;
   metricsEl.replaceChildren(...(m ? [
-    `인물 ${Math.round(m.heightRatio * 100)}%`,
-    `배경 ${Math.round(m.backgroundArea * 100)}%`,
-    `${m.cx < 0.5 ? "좌" : "우"} ${Math.round(Math.abs(m.cx - 0.5) * 200)}%`,
+    `인물 ${q5(m.heightRatio)}%`,
+    `배경 ${q5(m.backgroundArea)}%`,
+    `${m.cx < 0.5 ? "좌" : "우"} ${q5(Math.abs(m.cx - 0.5) * 2)}%`,
     `${m.people}명`,
   ].map((t) => Object.assign(document.createElement("span"), { textContent: t })) : []));
 

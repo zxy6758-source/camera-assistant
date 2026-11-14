@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluate } from "../logic.js";
+import { evaluate, Stabilizer } from "../logic.js";
 
 // 서 있는 사람 하나를 만든다: 머리 y=top, 발 y=bottom, 가운데 x=cx
 function person({ top, bottom, cx = 0.5, halfW = 0.08, vis = 1 }) {
@@ -72,4 +72,44 @@ test("여러 명은 합집합 박스", () => {
   const r = evaluate([person({ top: 0.2, bottom: 0.8, cx: 0.3 }), person({ top: 0.2, bottom: 0.8, cx: 0.7 })], { mode: "full", bg: "normal" });
   assert.equal(r.metrics.people, 2);
   assert.ok(Math.abs(r.metrics.cx - 0.5) < 0.02);
+});
+
+test("여러 명: 오른쪽 끝 사람이 잘리면 방향을 알려줌", () => {
+  const r = evaluate([person({ top: 0.2, bottom: 0.8, cx: 0.3 }), person({ top: 0.2, bottom: 0.8, cx: 0.97, halfW: 0.08 })], { mode: "full", bg: "normal" });
+  assert.ok(r.issues.some((t) => t.includes("오른쪽 끝 사람이 잘려요")), JSON.stringify(r.issues));
+});
+
+test("여러 명: 뒤 사람의 발이 가려져도(맨 앞 사람 발이 보이면) 발 경고 없음", () => {
+  const back = person({ top: 0.25, bottom: 0.7, cx: 0.65 });
+  for (const i of [25, 26, 27, 28, 29, 30, 31, 32]) back[i].visibility = 0.1;
+  const r = evaluate([person({ top: 0.15, bottom: 0.82, cx: 0.4 }), back], { mode: "full", bg: "normal" });
+  assert.ok(!r.issues.some((t) => t.includes("발")), JSON.stringify(r.issues));
+});
+
+test("히스테리시스: 경계값에서 margin이 있으면 OK 유지", () => {
+  const p = person({ top: 0.08, bottom: 0.907 }); // 추정 인물 높이 약 0.77 > normal.max(0.75)
+  assert.equal(run(p).ok, false);
+  assert.equal(run(p, { margin: 0.05 }).ok, true);
+});
+
+test("Stabilizer: 순간적인 경고는 OK를 깨지 못함", () => {
+  const st = new Stabilizer();
+  const ok = { level: "ok", speak: "좋아요", issues: ["구도 좋아요"], metrics: {}, box: null };
+  const warn = { level: "warn", speak: "조금 뒤로", issues: ["x"], metrics: {}, box: null };
+  st.update(ok, 0);
+  assert.equal(st.update(warn, 100).level, "ok");   // 0.1초 경고 → 유지
+  assert.equal(st.update(ok, 200).level, "ok");
+  assert.equal(st.update(warn, 300).level, "ok");
+  assert.equal(st.update(warn, 1700).level, "ok");  // 1.4초 지속 < 1.5초
+  assert.equal(st.update(warn, 1900).level, "warn"); // 1.6초 지속 → 전환
+});
+
+test("Stabilizer: 경고→OK는 1초 이상 계속 좋아야 전환", () => {
+  const st = new Stabilizer();
+  const ok = { level: "ok", speak: "좋아요", issues: [], metrics: {}, box: null };
+  const warn = { level: "warn", speak: "조금 뒤로", issues: ["x"], metrics: {}, box: null };
+  st.update(warn, 0);
+  assert.equal(st.update(ok, 100).level, "warn");
+  assert.equal(st.update(ok, 900).level, "warn");
+  assert.equal(st.update(ok, 1200).level, "ok");
 });

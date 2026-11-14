@@ -57,6 +57,7 @@ export function unionBox(boxes) {
  */
 export function evaluate(people, opt) {
   const mode = opt.mode ?? "full";
+  const m = opt.margin ?? 0; // 이미 "좋아요"인 상태에서 기준선을 넓혀 경계에서 깜빡이지 않게 함(히스테리시스)
   const preset = BG_PRESETS[opt.bg ?? "normal"];
   const boxes = (people || []).map(personBox).filter(Boolean);
   if (boxes.length === 0) {
@@ -82,28 +83,37 @@ export function evaluate(people, opt) {
   const issues = []; // {text, speak}
   const add = (text, speak = text) => issues.push({ text, speak });
 
-  // 1) 잘림
-  if (b.top < 0.03) add("머리 위 여백이 없어요", "머리가 잘려요. 뒤로 물러나세요");
-  if (b.left < 0.02 || b.right > 0.98) add("몸이 옆으로 잘려요", "몸이 옆으로 잘려요. 화면 안쪽으로 모이세요");
+  // 1) 잘림 — 사람별로 확인 (여러 명이면 어느 쪽 사람이 잘리는지 알려 줌)
+  const n = boxes.length;
+  const front = boxes.reduce((a, c) => (c.bottom > a.bottom ? c : a)); // 가장 앞(아래)에 있는 사람
+  if (boxes.some((p) => p.top < 0.03)) {
+    add(n > 1 ? "머리가 잘리는 사람이 있어요" : "머리 위 여백이 없어요", "머리가 잘려요. 뒤로 물러나세요");
+  }
+  const leftCut = boxes.some((p) => p.left < 0.02), rightCut = boxes.some((p) => p.right > 0.98);
+  if (leftCut || rightCut) {
+    const side = leftCut && rightCut ? "양쪽 끝" : leftCut ? "왼쪽 끝" : "오른쪽 끝";
+    add(n > 1 ? `화면 ${side} 사람이 잘려요` : "몸이 옆으로 잘려요", n > 1 ? `화면 ${side} 사람이 잘려요. 안쪽으로 모이세요` : "몸이 옆으로 잘려요. 화면 안쪽으로 모이세요");
+  }
   if (mode === "full") {
-    if (!b.feetVisible || b.feetY > 0.985) add("발이 잘리거나 안 보여요", "발이 잘려요. 뒤로 물러나세요");
-  } else if (!b.hipsVisible) {
+    // 뒤에 선 사람은 앞사람에 가려 발이 안 잡힐 수 있으므로, 맨 앞 사람의 발이 보이는지 + 어느 누구든 발이 화면 아래 끝에 닿았는지를 본다
+    if (!front.feetVisible || boxes.some((p) => p.feetVisible && p.feetY > 0.985)) add("발이 잘리거나 안 보여요", "발이 잘려요. 뒤로 물러나세요");
+  } else if (!front.hipsVisible) {
     add("허리 아래까지 안 보여요", "상체가 너무 가까워요. 조금 뒤로 물러나세요");
   }
 
   // 2) 크기(= 배경 비중)
   const bodyH = h; // 보이는 부분(머리~가장 낮은 보이는 지점)의 높이 기준
-  if (bodyH > preset.max) {
+  if (bodyH > preset.max + m) {
     add(`인물이 너무 커요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)})`, "조금 뒤로 물러나세요");
-  } else if (bodyH < preset.min) {
+  } else if (bodyH < preset.min - m) {
     add(`인물이 너무 작아요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)})`, "조금 앞으로 오세요");
   }
 
   // 3) 좌우 위치 (화면 기준)
   const dx = cx - 0.5;
-  if (Math.abs(dx) > 0.12) {
+  if (Math.abs(dx) > 0.12 + m) {
     const dir = dx < 0 ? "오른쪽" : "왼쪽";
-    add(`화면 ${dx < 0 ? "왼쪽" : "오른쪽"}으로 치우침`, `화면 기준 ${dir}으로 이동하세요`);
+    add(`${n > 1 ? "단체가 " : ""}화면 ${dx < 0 ? "왼쪽" : "오른쪽"}으로 치우침`, `화면 기준 ${dir}으로 이동하세요`);
   }
 
   // 4) 상하 균형: 머리 위 여백이 너무 크면(인물이 아래로 쏠림)
@@ -130,4 +140,32 @@ export function evaluate(people, opt) {
 
 function pct(v) {
   return Math.round(v * 100) + "%";
+}
+
+
+/**
+ * 판정 안정화: 결과가 바뀌어도 일정 시간 이상 유지될 때만 화면/음성에 반영한다.
+ * - 경고 → "좋아요": okHold 이상 계속 좋아야 전환
+ * - "좋아요" → 경고: leaveOkHold 이상 계속 나빠야 전환 (순간 흔들림 무시)
+ * - 경고 문구 간 전환: issueHold
+ * 수치(metrics)와 박스는 상태와 무관하게 항상 최신으로 갱신한다.
+ */
+export class Stabilizer {
+  constructor({ okHold = 1000, leaveOkHold = 1500, issueHold = 800, noneHold = 1500 } = {}) {
+    Object.assign(this, { okHold, leaveOkHold, issueHold, noneHold });
+    this.shown = null; this.shownKey = ""; this.cand = ""; this.since = 0;
+  }
+  get isOk() { return this.shown?.level === "ok"; }
+  update(raw, now) {
+    const key = raw.level + "|" + (raw.level === "warn" ? raw.speak : "");
+    if (!this.shown) { this.shown = raw; this.shownKey = this.cand = key; this.since = now; return this.shown; }
+    if (key === this.shownKey) { this.cand = key; this.since = now; this.shown = raw; return raw; }
+    if (key !== this.cand) { this.cand = key; this.since = now; }
+    const hold = raw.level === "ok" ? this.okHold
+      : raw.level === "none" ? this.noneHold
+      : this.shown.level === "ok" ? this.leaveOkHold : this.issueHold;
+    if (now - this.since >= hold) { this.shown = raw; this.shownKey = key; }
+    else this.shown = { ...this.shown, metrics: raw.metrics, box: raw.box };
+    return this.shown;
+  }
 }
