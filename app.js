@@ -58,9 +58,35 @@ async function startCamera() {
   video.srcObject = stream;
   await video.play();
   await new Promise((r) => (video.videoWidth ? r() : (video.onloadedmetadata = r)));
-  $("stage").style.aspectRatio = `${video.videoWidth}/${video.videoHeight}`;
   overlay.width = video.videoWidth; overlay.height = video.videoHeight;
   try { state.wake = await navigator.wakeLock?.request("screen"); } catch {}
+  setupZoom(stream.getVideoTracks()[0]);
+}
+
+// ---------- 줌 ----------
+// 브라우저가 track capabilities의 zoom을 제공하는 기기에서만 동작(미지원 기기는 버튼 숨김).
+function setupZoom(track) {
+  const box = $("zoom"); box.replaceChildren();
+  const cap = track.getCapabilities?.().zoom;
+  if (!cap || !(cap.max > cap.min)) {
+    box.appendChild(Object.assign(document.createElement("span"), { id: "zoomnote", textContent: "이 기기·브라우저는 줌 조절 미지원 (거리로 조절)" }));
+    return;
+  }
+  const levels = [...new Set([cap.min, 0.5, 1, 2, 3, 5].filter((z) => z >= cap.min - 1e-6 && z <= cap.max + 1e-6).map((z) => +z.toFixed(1)))].sort((a, b) => a - b);
+  const apply = async (z, btn) => {
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: z }] });
+      box.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === btn));
+    } catch (e) { log("줌 적용 실패: " + (e?.message || e)); }
+  };
+  for (const z of levels) {
+    const b = Object.assign(document.createElement("button"), { textContent: z + "x" });
+    b.onclick = () => apply(z, b);
+    box.appendChild(b);
+  }
+  const cur = track.getSettings?.().zoom ?? 1;
+  const nearest = [...box.children].reduce((a, b) => (Math.abs(parseFloat(b.textContent) - cur) < Math.abs(parseFloat(a.textContent) - cur) ? b : a));
+  nearest.classList.add("on");
 }
 
 async function loadModel() {
@@ -114,13 +140,14 @@ function loop() {
 function render(r, people) {
   banner.className = r.level;
   banner.textContent = r.level === "ok" ? "✔ 구도 좋아요" : r.issues[0];
-  issuesEl.replaceChildren(...(r.level === "ok" ? [] : r.issues.slice(1).map((t) => Object.assign(document.createElement("li"), { textContent: t }))));
+  issuesEl.replaceChildren(...(r.level === "ok" ? [] : r.issues.slice(1, 3).map((t) => Object.assign(document.createElement("li"), { textContent: t }))));
   const m = r.metrics;
-  metricsEl.innerHTML = m ? `
-    <div>인물 높이<b>${Math.round(m.heightRatio * 100)}%</b></div>
-    <div>배경 비중(박스 기준)<b>${Math.round(m.backgroundArea * 100)}%</b></div>
-    <div>좌우 위치<b>${m.cx < 0.5 ? "왼쪽 " : "오른쪽 "}${Math.round(Math.abs(m.cx - 0.5) * 200)}%</b></div>
-    <div>인원<b>${m.people}명</b></div>` : "";
+  metricsEl.replaceChildren(...(m ? [
+    `인물 ${Math.round(m.heightRatio * 100)}%`,
+    `배경 ${Math.round(m.backgroundArea * 100)}%`,
+    `${m.cx < 0.5 ? "좌" : "우"} ${Math.round(Math.abs(m.cx - 0.5) * 200)}%`,
+    `${m.people}명`,
+  ].map((t) => Object.assign(document.createElement("span"), { textContent: t })) : []));
 
   const W = overlay.width, H = overlay.height;
   ctx.clearRect(0, 0, W, H);
@@ -176,6 +203,7 @@ function startRecording() {
 }
 const stopRecording = () => state.recorder && state.recorder.state !== "inactive" && (beep(500, 150), state.recorder.stop());
 
+$("gear").onclick = () => $("panel").classList.toggle("open");
 $("shot").onclick = takePhoto;
 $("vid").onclick = () => (state.recorder ? stopRecording() : startRecording());
 
