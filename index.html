@@ -60,12 +60,15 @@
     <div id="rec">● REC</div>
     <div id="countdown"></div>
 
-    <button id="start">시작<br><small style="font-weight:400">카메라·마이크 허용 · v9</small></button>
+    <button id="start">시작<br><small style="font-weight:400">카메라·마이크 허용 · v10</small></button>
 
     <div id="panel">
       <div class="row">
         <label>범위
           <select id="mode"><option value="full">전신</option><option value="half">상반신</option></select>
+        </label>
+        <label>자세
+          <select id="posture"><option value="auto">자동</option><option value="stand">서 있음</option><option value="sit">앉아 있음</option></select>
         </label>
         <label>배경
           <select id="bg"><option value="wide">넓게</option><option value="normal" selected>보통</option><option value="tight">인물 중심</option></select>
@@ -94,6 +97,6 @@
     </div>
   </div>
 
-<script type="module" src="./app.js?v=9"></script>
+<script type="module" src="./app.js?v=10"></script>
 </body>
 </html>

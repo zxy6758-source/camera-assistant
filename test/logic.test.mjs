@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, Stabilizer, mergePeople, personBox, sortByX, smoothBoxes } from "../logic.js";
+import { evaluate, Stabilizer, mergePeople, personBox, sortByX, smoothBoxes, classifyPosture } from "../logic.js";
 
 // 서 있는 사람 하나를 만든다: 머리 y=top, 발 y=bottom, 가운데 x=cx
 function person({ top, bottom, cx = 0.5, halfW = 0.08, vis = 1 }) {
@@ -12,6 +12,7 @@ function person({ top, bottom, cx = 0.5, halfW = 0.08, vis = 1 }) {
   set(2, cx - 0.01, eyeY); set(5, cx + 0.01, eyeY);
   set(11, cx - halfW, top + 0.25 * H); set(12, cx + halfW, top + 0.25 * H);
   set(23, cx - halfW / 2, top + 0.55 * H); set(24, cx + halfW / 2, top + 0.55 * H);
+  set(25, cx - halfW / 2, top + 0.8 * H); set(26, cx + halfW / 2, top + 0.8 * H); // 서 있을 때 무릎
   for (const i of [27, 28, 29, 30, 31, 32]) set(i, cx, bottom);
   return lm;
 }
@@ -158,4 +159,47 @@ test("병합: keepUnmatchedPose=false면 매칭 안 된 포즈는 버림(오래�
   const m = mergePeople([pose], [det(0.6, 0.25, 0.8, 0.8)], { keepUnmatchedPose: false });
   assert.equal(m.length, 1);
   assert.equal(mergePeople([pose], [det(0.6, 0.25, 0.8, 0.8)]).length, 2);
+});
+
+// 앉은 사람: 무릎을 골반(0.55H) 바로 아래로 올려 허벅지가 카메라를 향한 모습
+function sitting(o) {
+  const lm = person(o), H = o.bottom - o.top;
+  lm[25] = { ...lm[25], y: o.top + 0.60 * H }; lm[26] = { ...lm[26], y: o.top + 0.60 * H };
+  return lm;
+}
+
+test("자세 판별: 서있음/앉음/불명", () => {
+  assert.equal(classifyPosture(personBox(person({ top: 0.1, bottom: 0.9 })).kneeRatio), "standing");
+  assert.equal(classifyPosture(personBox(sitting({ top: 0.1, bottom: 0.9 })).kneeRatio), "sitting");
+  const p = person({ top: 0.1, bottom: 0.9 }); p[25].visibility = p[26].visibility = 0.1;
+  assert.equal(classifyPosture(personBox(p).kneeRatio), "unknown");
+});
+
+test("앉은 사람(높이 약 0.5)은 서 있는 기준으로는 '작아요', 앉은 기준으로는 OK", () => {
+  const sit = sitting({ top: 0.3, bottom: 0.8 }); // 추정 높이 약 0.47 (서있는 normal 최소 0.5 미만)
+  const standingRef = run(person({ top: 0.3, bottom: 0.8 }));
+  assert.ok(standingRef.issues.some((x) => x.includes("너무 작아요")), JSON.stringify(standingRef.issues));
+  const r = run(sit);
+  assert.equal(r.metrics.allSitting, true);
+  assert.ok(!r.issues.some((x) => x.includes("너무 작아요")), JSON.stringify(r.issues));
+});
+
+test("앉은 사람은 발이 안 보여도 '발' 경고 없음 / 서 있으면 경고", () => {
+  const sit = sitting({ top: 0.25, bottom: 0.85 });
+  for (const i of [27, 28, 29, 30, 31, 32]) sit[i].visibility = 0.1;
+  assert.ok(!run(sit).issues.some((x) => x.includes("발")));
+  const stand = person({ top: 0.1, bottom: 0.9 });
+  for (const i of [27, 28, 29, 30, 31, 32]) stand[i].visibility = 0.1;
+  assert.ok(run(stand).issues.some((x) => x.includes("발")));
+});
+
+test("자세 수동 고정(posture: sit)", () => {
+  const r = run(person({ top: 0.3, bottom: 0.8 }), { posture: "sit" });
+  assert.equal(r.metrics.allSitting, true);
+});
+
+test("혼합(서 있는 사람 + 앉은 사람)은 서 있는 기준 유지", () => {
+  const r = evaluate([person({ top: 0.15, bottom: 0.82, cx: 0.3 }), sitting({ top: 0.35, bottom: 0.82, cx: 0.7 })], { mode: "full", bg: "normal" });
+  assert.equal(r.metrics.allSitting, false);
+  assert.deepEqual([r.metrics.postures.standing, r.metrics.postures.sitting], [1, 1]);
 });

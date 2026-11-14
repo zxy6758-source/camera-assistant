@@ -1,7 +1,17 @@
 // 구도 판정 로직 (DOM/카메라 의존 없음 → Node에서 단위 테스트 가능)
 // 좌표는 모두 0~1 정규화(영상 가로·세로 기준), y는 아래로 증가.
 
-export const VIS = 0.35; // 랜드마크를 "보인다"고 인정하는 최소 visibility
+export const VIS = 0.35;
+
+// 자세 판별: kneeRatio = (무릎y − 골반y) / (골반y − 어깨y).
+// 정면에서 서 있으면 무릎이 골반 아래로 몸통 길이의 약 0.7~0.9배, 앉으면 허벅지가 카메라 쪽을 향해 0~0.4배 정도(추정치, 카메라 각도에 따라 달라질 수 있음).
+export const SIT_THRESHOLD = 0.55;
+// 앉은 자세는 머리~발 높이가 서 있을 때의 약 0.8배라고 보고 목표 비율 범위를 줄임(추정치)
+export const SITTING_SCALE = 0.8;
+export function classifyPosture(kneeRatio) {
+  if (!Number.isFinite(kneeRatio)) return "unknown";
+  return kneeRatio < SIT_THRESHOLD ? "sitting" : "standing";
+} // 랜드마크를 "보인다"고 인정하는 최소 visibility
 
 // 배경 비중 프리셋: 인물 높이가 화면 높이에서 차지하는 비율의 목표 범위
 // (이 수치는 일반적으로 쓰는 경험적 기준이며 사용자가 취향에 맞게 조정 가능)
@@ -34,7 +44,11 @@ export function personBox(lm) {
   const feetVisible = [27, 28, 29, 30, 31, 32].some(ok);
   const lowest = Math.max(...[27, 28, 29, 30, 31, 32].filter(ok).map((i) => lm[i].y), -Infinity);
   const hipsVisible = ok(23) || ok(24);
-  return { top, bottom, left, right, feetVisible, feetY: lowest, hipsVisible };
+  const avgY = (ids) => { const v = ids.filter(ok).map((i) => lm[i].y); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN; };
+  const shY = avgY([11, 12]), hipY = avgY([23, 24]), kneeY = avgY([25, 26]);
+  const torso = hipY - shY;
+  const kneeRatio = torso > 0.03 && Number.isFinite(kneeY) ? (kneeY - hipY) / torso : NaN;
+  return { top, bottom, left, right, feetVisible, feetY: lowest, hipsVisible, kneeRatio };
 }
 
 export function unionBox(boxes) {
@@ -59,11 +73,17 @@ export function unionBox(boxes) {
 export function evaluate(people, opt) {
   const mode = opt.mode ?? "full";
   const m = opt.margin ?? 0; // 이미 "좋아요"인 상태에서 기준선을 넓혀 경계에서 깜빡이지 않게 함(히스테리시스)
-  const preset = BG_PRESETS[opt.bg ?? "normal"];
+  const base = BG_PRESETS[opt.bg ?? "normal"];
   const boxes = (people || []).map(personBox).filter(Boolean);
   if (boxes.length === 0) {
     return { ok: false, level: "none", issues: ["사람이 보이지 않아요"], speak: "사람이 보이지 않아요", metrics: null, box: null };
   }
+  // 자세: 사람별 판별(자동) 또는 사용자가 고정. 전원이 앉아 있으면 전신 목표 범위를 줄이고 발 확인을 완화한다.
+  const forced = opt.posture ?? "auto";
+  const posts = boxes.map((p) => (forced === "sit" ? "sitting" : forced === "stand" ? "standing" : classifyPosture(p.kneeRatio)));
+  const allSitting = mode === "full" && posts.every((x) => x === "sitting");
+  const sc = allSitting ? SITTING_SCALE : 1;
+  const preset = { ...base, min: base.min * sc, max: base.max * sc };
   const b = unionBox(boxes);
   const h = b.bottom - b.top;
   const w = b.right - b.left;
@@ -73,6 +93,8 @@ export function evaluate(people, opt) {
   const areaRatio = clip(b.right - b.left) * clip(h); // 근사: 경계 상자 면적
   const metrics = {
     people: boxes.length,
+    postures: { standing: posts.filter((x) => x === "standing").length, sitting: posts.filter((x) => x === "sitting").length, unknown: posts.filter((x) => x === "unknown").length },
+    allSitting,
     heightRatio: h,
     personArea: Math.min(1, areaRatio),
     backgroundArea: Math.max(0, 1 - areaRatio),
@@ -97,7 +119,7 @@ export function evaluate(people, opt) {
   }
   if (mode === "full") {
     // 뒤에 선 사람은 앞사람에 가려 발이 안 잡힐 수 있으므로, 맨 앞 사람의 발이 보이는지 + 어느 누구든 발이 화면 아래 끝에 닿았는지를 본다
-    if (!front.feetVisible || boxes.some((p) => p.feetVisible && p.feetY > 0.985)) add("발이 잘리거나 안 보여요", "발이 잘려요. 뒤로 물러나세요");
+    if ((!front.feetVisible && !allSitting) || boxes.some((p) => p.feetVisible && p.feetY > 0.985)) add("발이 잘리거나 안 보여요", "발이 잘려요. 뒤로 물러나세요");
   } else if (!front.hipsVisible) {
     add("허리 아래까지 안 보여요", "상체가 너무 가까워요. 조금 뒤로 물러나세요");
   }
@@ -105,9 +127,9 @@ export function evaluate(people, opt) {
   // 2) 크기(= 배경 비중)
   const bodyH = h; // 보이는 부분(머리~가장 낮은 보이는 지점)의 높이 기준
   if (bodyH > preset.max + m) {
-    add(`인물이 너무 커요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)})`, "조금 뒤로 물러나세요");
+    add(`인물이 너무 커요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)}${allSitting ? ", 앉은 자세 기준" : ""})`, "조금 뒤로 물러나세요");
   } else if (bodyH < preset.min - m) {
-    add(`인물이 너무 작아요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)})`, "조금 앞으로 오세요");
+    add(`인물이 너무 작아요 (${pct(bodyH)} / 목표 ${pct(preset.min)}~${pct(preset.max)}${allSitting ? ", 앉은 자세 기준" : ""})`, "조금 앞으로 오세요");
   }
 
   // 3) 좌우 위치 (화면 기준)
@@ -203,10 +225,11 @@ export function mergePeople(poseBoxes, dets, { keepUnmatchedPose = true } = {}) 
         feetVisible: p.feetVisible || d.bottom <= 0.985,
         feetY: p.feetVisible ? Math.max(p.feetY, d.bottom > 0.985 ? d.bottom : -Infinity) : d.bottom,
         hipsVisible: p.hipsVisible || d.bottom <= 0.985,
+        kneeRatio: p.kneeRatio,
         source: "both",
       });
     } else {
-      out.push({ top: d.top, bottom: d.bottom, left: d.left, right: d.right, feetVisible: true, feetY: d.bottom, hipsVisible: true, source: "det" });
+      out.push({ top: d.top, bottom: d.bottom, left: d.left, right: d.right, feetVisible: true, feetY: d.bottom, hipsVisible: true, kneeRatio: NaN, source: "det" });
     }
   }
   if (keepUnmatchedPose) poseBoxes.forEach((p, i) => { if (!used.has(i)) out.push({ ...p, source: "pose" }); });
@@ -220,6 +243,6 @@ export function smoothBoxes(prev, cur, a = 0.3) {
   if (!prev || prev.length !== cur.length) return cur;
   return cur.map((c, i) => {
     const p = prev[i], mix = (k) => (Number.isFinite(p[k]) && Number.isFinite(c[k]) ? a * c[k] + (1 - a) * p[k] : c[k]);
-    return { ...c, top: mix("top"), bottom: mix("bottom"), left: mix("left"), right: mix("right"), feetY: mix("feetY") };
+    return { ...c, top: mix("top"), bottom: mix("bottom"), left: mix("left"), right: mix("right"), feetY: mix("feetY"), kneeRatio: mix("kneeRatio") };
   });
 }

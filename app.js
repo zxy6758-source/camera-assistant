@@ -1,5 +1,5 @@
 import { PoseLandmarker, ObjectDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { evaluate, Stabilizer, personBox, mergePeople, sortByX, smoothBoxes } from "./logic.js?v=7";
+import { evaluate, Stabilizer, personBox, mergePeople, sortByX, smoothBoxes } from "./logic.js?v=10";
 const stab = new Stabilizer();
 
 const $ = (id) => document.getElementById(id);
@@ -14,7 +14,7 @@ const store = {
   get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
-for (const id of ["mode", "bg"]) { $(id).value = store.get(id, $(id).value); $(id).onchange = () => store.set(id, $(id).value); }
+for (const id of ["mode", "bg", "posture"]) { $(id).value = store.get(id, $(id).value); $(id).onchange = () => store.set(id, $(id).value); }
 for (const id of ["tts", "voice"]) { $(id).checked = store.get(id, "1") === "1"; $(id).onchange = () => { store.set(id, $(id).checked ? "1" : "0"); if (id === "voice") syncRecognition(); }; }
 
 const log = (t) => (logEl.textContent = t);
@@ -206,7 +206,7 @@ function loop() {
   state.poseEvery = state.ms < 150 ? 1 : state.ms < 300 ? 2 : 3;
   state.fps = Math.round(1000 / Math.max(110, state.ms + 10));
   const margin = stab.isOk ? 0.05 : 0; // 좋아요 상태에서는 기준을 5%p 넓혀 경계에서 깜빡이지 않게
-  const opts = { mode: $("mode").value, bg: $("bg").value, margin };
+  const opts = { mode: $("mode").value, bg: $("bg").value, posture: $("posture").value, margin };
   let luma = null;
   if (people.length) {
     const first = evaluate(people, opts);
@@ -217,6 +217,14 @@ function loop() {
   maybeSpeak(r.speak, Date.now());
 }
 
+function postureLabel(m) {
+  const { standing: st, sitting: si, unknown: un } = m.postures;
+  const parts = [];
+  if (st) parts.push(`서 ${st}`);
+  if (si) parts.push(`앉 ${si}`);
+  if (un) parts.push(`자세? ${un}`);
+  return parts.join("·");
+}
 const q5 = (v) => Math.round((v * 100) / 5) * 5; // 표시용: 5% 단위로 반올림해 숫자가 덜 흔들리게
 function render(r, people, poses) {
   banner.className = r.level;
@@ -228,6 +236,7 @@ function render(r, people, poses) {
     `배경 ${q5(m.backgroundArea)}%`,
     `${m.cx < 0.5 ? "좌" : "우"} ${q5(Math.abs(m.cx - 0.5) * 2)}%`,
     `${m.people}명`,
+    postureLabel(m),
   ] : []), `${state.fps ?? "-"}fps`].map((t) => Object.assign(document.createElement("span"), { textContent: t })));
 
   const W = overlay.width, H = overlay.height;
