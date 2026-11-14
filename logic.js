@@ -184,7 +184,7 @@ export function iou(a, b) {
 }
 
 /** poseBoxes: personBox() 결과들, dets: {top,bottom,left,right,score} (0~1). */
-export function mergePeople(poseBoxes, dets) {
+export function mergePeople(poseBoxes, dets, { keepUnmatchedPose = true } = {}) {
   const out = [], used = new Set();
   for (const d of [...dets].sort((x, y) => (y.score ?? 0) - (x.score ?? 0))) {
     let best = -1, bestV = 0;
@@ -209,7 +209,7 @@ export function mergePeople(poseBoxes, dets) {
       out.push({ top: d.top, bottom: d.bottom, left: d.left, right: d.right, feetVisible: true, feetY: d.bottom, hipsVisible: true, source: "det" });
     }
   }
-  poseBoxes.forEach((p, i) => { if (!used.has(i)) out.push({ ...p, source: "pose" }); });
+  if (keepUnmatchedPose) poseBoxes.forEach((p, i) => { if (!used.has(i)) out.push({ ...p, source: "pose" }); });
   return out;
 }
 

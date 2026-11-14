@@ -152,3 +152,10 @@ test("정렬/평활: 같은 인원이면 평활, 다르면 새 값", () => {
   assert.ok(s[0].top > a[0].top && s[0].top < a[0].top + 0.1);
   assert.equal(smoothBoxes(a, [a[0]]).length, 1);
 });
+
+test("병합: keepUnmatchedPose=false면 매칭 안 된 포즈는 버림(오래된 포즈로 인한 중복 방지)", () => {
+  const pose = personBox(person({ top: 0.2, bottom: 0.8, cx: 0.3 }));
+  const m = mergePeople([pose], [det(0.6, 0.25, 0.8, 0.8)], { keepUnmatchedPose: false });
+  assert.equal(m.length, 1);
+  assert.equal(mergePeople([pose], [det(0.6, 0.25, 0.8, 0.8)]).length, 2);
+});

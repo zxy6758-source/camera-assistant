@@ -17,6 +17,7 @@
   #banner.ok { border-color:var(--ok); color:var(--ok); }
   #banner.warn { border-color:var(--warn); color:var(--warn); }
   #issues { margin:0; padding:0; list-style:none; font-size:14px; text-align:center; color:#fff; text-shadow:0 0 4px #000; }
+  #said { font-size:13px; text-align:center; color:#fff; text-shadow:0 0 4px #000; min-height:1em; }
   #metrics { display:flex; justify-content:center; gap:6px; flex-wrap:wrap; }
   #metrics span { background:var(--glass); border-radius:20px; padding:3px 10px; font-size:13px; }
 
@@ -53,12 +54,13 @@
     <div id="top">
       <div id="banner">시작을 눌러주세요</div>
       <ul id="issues"></ul>
+      <div id="said"></div>
       <div id="metrics"></div>
     </div>
     <div id="rec">● REC</div>
     <div id="countdown"></div>
 
-    <button id="start">시작<br><small style="font-weight:400">카메라·마이크 허용 · v7</small></button>
+    <button id="start">시작<br><small style="font-weight:400">카메라·마이크 허용 · v8</small></button>
 
     <div id="panel">
       <div class="row">
@@ -73,6 +75,7 @@
         <label><input type="checkbox" id="tts" checked> 음성 안내</label>
         <label><input type="checkbox" id="voice" checked> 음성 명령</label>
       </div>
+      <div class="row"><button id="ttsTest">음성 안내 테스트</button></div>
       <div id="gallery"></div>
       <p class="note">
         음성 명령: “스마일 / 김치 / 촬영 / 찰칵” = 사진(2초 뒤), “동영상 촬영” = 녹화 시작, “정지” = 녹화 종료.<br>
@@ -91,6 +94,6 @@
     </div>
   </div>
 
-<script type="module" src="./app.js?v=7"></script>
+<script type="module" src="./app.js?v=8"></script>
 </body>
 </html>

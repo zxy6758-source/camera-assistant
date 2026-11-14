@@ -23,14 +23,32 @@ window.addEventListener("unhandledrejection", (e) => log("오류: " + (e.reason?
 
 // ---------- 음성 안내 (TTS) ----------
 // 주의: 안내 문장에 명령어("촬영","스마일","김치","찰칵")를 넣지 않는다 → 자기 목소리로 셔터가 눌리는 것을 방지.
+let koVoice = null; const keepAlive = [];
+function pickVoice() {
+  const vs = speechSynthesis.getVoices?.() || [];
+  koVoice = vs.find((v) => /^ko[-_]KR$/i.test(v.lang)) || vs.find((v) => v.lang?.toLowerCase().startsWith("ko")) || null;
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
 function speak(text) {
-  if (!$("tts").checked || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "ko-KR"; u.rate = 1.05;
-  state.speakingUntil = Date.now() + 4000;
-  u.onend = () => (state.speakingUntil = Date.now() + 800);
-  speechSynthesis.cancel();
-  speechSynthesis.speak(u);
+  const said = $("said");
+  if (!("speechSynthesis" in window)) { said.textContent = "이 브라우저는 음성 안내를 지원하지 않아요 (화면 문구만 표시)"; return; }
+  if (!$("tts").checked) return;
+  const go = () => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ko-KR"; if (koVoice) u.voice = koVoice; u.rate = 1.05; u.volume = 1;
+    keepAlive.push(u); if (keepAlive.length > 5) keepAlive.shift(); // 일부 브라우저에서 GC되면 onend/소리가 사라지는 문제 방지
+    state.speakingUntil = Date.now() + 6000;
+    pauseRecognition(); // 안드로이드는 음성 인식 중에 안내 소리가 안 나올 수 있어, 말하는 동안 인식을 멈춘다
+    const done = () => { state.speakingUntil = Date.now() + 800; setTimeout(resumeRecognition, 400); };
+    u.onend = done;
+    u.onerror = (e) => { done(); said.textContent = "🔇 음성 오류: " + (e.error || "알 수 없음"); };
+    speechSynthesis.resume();
+    speechSynthesis.speak(u);
+    said.textContent = "🔊 " + text + (koVoice ? "" : "  (한국어 음성 없음 → 기본 음성)");
+  };
+  // cancel 직후 바로 speak하면 소리가 사라지는 경우가 있어 잠깐 띄운다
+  if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); setTimeout(go, 100); } else go();
 }
 
 function beep(freq = 880, ms = 120) {
@@ -55,7 +73,7 @@ function maybeSpeak(text, now) {
 // ---------- 카메라 ----------
 async function startCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 24, max: 30 } },
     audio: false, // 음성 인식과 마이크 충돌을 피하기 위해 영상만 사용
   });
   video.srcObject = stream;
@@ -63,7 +81,11 @@ async function startCamera() {
   await new Promise((r) => (video.videoWidth ? r() : (video.onloadedmetadata = r)));
   overlay.width = video.videoWidth; overlay.height = video.videoHeight;
   try { state.wake = await navigator.wakeLock?.request("screen"); } catch {}
-  setupZoom(stream.getVideoTracks()[0]);
+  const track = stream.getVideoTracks()[0];
+  // 가능한 기기에서만 적용되는 보조 설정(실패해도 무시): 연속 자동 노출/화이트밸런스/초점
+  try { await track.applyConstraints({ advanced: [{ exposureMode: "continuous", whiteBalanceMode: "continuous", focusMode: "continuous" }] }); } catch {}
+  try { state.imageCapture = "ImageCapture" in window ? new ImageCapture(track) : null; } catch { state.imageCapture = null; }
+  setupZoom(track);
 }
 
 // ---------- 줌 ----------
@@ -161,8 +183,13 @@ function loop() {
   if (now - lastRun < 110 || video.readyState < 2) return;
   lastRun = now;
   const ts = Math.max(now, lastTs + 1); lastTs = ts;
-  const res = state.landmarker.detectForVideo(video, ts);
-  const poseBoxes = (res.landmarks || []).map(personBox).filter(Boolean);
+  const t0 = performance.now();
+  state.tick = (state.tick || 0) + 1;
+  // 느린 기기에서는 무거운 포즈 모델을 매 프레임 돌리지 않고 N프레임마다 갱신(검출기는 매 프레임)
+  const freshPose = !state.lastPoses || state.tick % (state.poseEvery || 1) === 0;
+  if (freshPose) state.lastPoses = state.landmarker.detectForVideo(video, ts).landmarks || [];
+  const res = { landmarks: state.lastPoses };
+  const poseBoxes = res.landmarks.map(personBox).filter(Boolean);
   let dets = [];
   if (state.detector) {
     try {
@@ -172,8 +199,12 @@ function loop() {
         .map((d) => { const b = d.boundingBox; return { left: b.originX / W, top: b.originY / H, right: (b.originX + b.width) / W, bottom: (b.originY + b.height) / H, score: d.categories[0].score }; });
     } catch {}
   }
-  const people = stabilizeEntries(sortByX(mergePeople(poseBoxes, dets)), now);
+  const people = stabilizeEntries(sortByX(mergePeople(poseBoxes, dets, { keepUnmatchedPose: freshPose || !state.detector })), now);
 
+  const ms = performance.now() - t0;
+  state.ms = state.ms ? 0.8 * state.ms + 0.2 * ms : ms;
+  state.poseEvery = state.ms < 150 ? 1 : state.ms < 300 ? 2 : 3;
+  state.fps = Math.round(1000 / Math.max(110, state.ms + 10));
   const margin = stab.isOk ? 0.05 : 0; // 좋아요 상태에서는 기준을 5%p 넓혀 경계에서 깜빡이지 않게
   const opts = { mode: $("mode").value, bg: $("bg").value, margin };
   let luma = null;
@@ -192,12 +223,12 @@ function render(r, people, poses) {
   banner.textContent = r.level === "ok" ? "✔ 구도 좋아요" : r.issues[0];
   issuesEl.replaceChildren(...(r.level === "ok" ? [] : r.issues.slice(1, 3).map((t) => Object.assign(document.createElement("li"), { textContent: t }))));
   const m = r.metrics;
-  metricsEl.replaceChildren(...(m ? [
+  metricsEl.replaceChildren(...[...(m ? [
     `인물 ${q5(m.heightRatio)}%`,
     `배경 ${q5(m.backgroundArea)}%`,
     `${m.cx < 0.5 ? "좌" : "우"} ${q5(Math.abs(m.cx - 0.5) * 2)}%`,
     `${m.people}명`,
-  ].map((t) => Object.assign(document.createElement("span"), { textContent: t })) : []));
+  ] : []), `${state.fps ?? "-"}fps`].map((t) => Object.assign(document.createElement("span"), { textContent: t })));
 
   const W = overlay.width, H = overlay.height;
   ctx.clearRect(0, 0, W, H);
@@ -251,16 +282,23 @@ async function countdown(sec) {
 async function takePhoto() {
   if (!state.running) return;
   await countdown(2);
-  const c = document.createElement("canvas"); c.width = video.videoWidth; c.height = video.videoHeight;
-  c.getContext("2d").drawImage(video, 0, 0);
-  c.toBlob((blob) => {
-    if (!blob) return log("사진 저장 실패");
-    beep(1200, 80);
-    const name = `photo_${stamp()}.jpg`;
-    download(blob, name);
-    const img = new Image(); img.src = URL.createObjectURL(blob); $("gallery").prepend(img);
-    log(`저장: ${name} (브라우저 다운로드 폴더)`);
-  }, "image/jpeg", 0.95);
+  let blob = null, how = "화면 캡처";
+  // 정지 사진 모드(takePhoto)는 영상 프레임 캡처보다 보통 화질이 좋고 노이즈가 적다(기기 지원 시)
+  if (state.imageCapture) {
+    try { blob = await state.imageCapture.takePhoto(); how = "정지 사진 모드"; } catch { blob = null; }
+  }
+  if (!blob) {
+    const c = document.createElement("canvas"); c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext("2d").drawImage(video, 0, 0);
+    blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.95));
+  }
+  if (!blob) return log("사진 저장 실패");
+  beep(1200, 80);
+  const ext = blob.type.includes("png") ? "png" : "jpg";
+  const name = `photo_${stamp()}.${ext}`;
+  download(blob, name);
+  const img = new Image(); img.src = URL.createObjectURL(blob); $("gallery").prepend(img);
+  log(`저장: ${name} (${how}, 브라우저 다운로드 폴더)`);
 }
 
 function startRecording() {
@@ -281,13 +319,16 @@ function startRecording() {
 }
 const stopRecording = () => state.recorder && state.recorder.state !== "inactive" && (beep(500, 150), state.recorder.stop());
 
+$("ttsTest").onclick = () => speak("음성 안내 테스트입니다. 이 소리가 들리면 정상입니다");
 $("gear").onclick = () => $("panel").classList.toggle("open");
 $("shot").onclick = takePhoto;
 $("vid").onclick = () => (state.recorder ? stopRecording() : startRecording());
 
 // ---------- 음성 명령 (브라우저 음성 인식) ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, recWanted = false;
+let rec = null, recWanted = false, recPaused = false;
+function pauseRecognition() { recPaused = true; try { rec?.abort(); } catch {} }
+function resumeRecognition() { recPaused = false; if (recWanted && rec) { try { rec.start(); } catch {} } }
 function syncRecognition() {
   recWanted = state.running && $("voice").checked;
   if (!recWanted) { try { rec?.stop(); } catch {} return; }
@@ -306,7 +347,7 @@ function syncRecognition() {
     }
   };
   rec.onerror = (e) => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { recWanted = false; log("마이크 권한이 필요해요"); } };
-  rec.onend = () => { if (recWanted) setTimeout(() => { try { rec.start(); } catch {} }, 300); };
+  rec.onend = () => { if (recWanted && !recPaused) setTimeout(() => { try { rec.start(); } catch {} }, 300); };
   try { rec.start(); } catch {}
 }
 
