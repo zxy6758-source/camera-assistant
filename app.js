@@ -1,5 +1,5 @@
-import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
-import { evaluate, Stabilizer } from "./logic.js?v=6";
+import { PoseLandmarker, ObjectDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { evaluate, Stabilizer, personBox, mergePeople, sortByX, smoothBoxes } from "./logic.js?v=7";
 const stab = new Stabilizer();
 
 const $ = (id) => document.getElementById(id);
@@ -106,24 +106,34 @@ async function loadModel() {
   });
   // 정확도가 더 높은 full 모델 우선, 실패 시 GPU→CPU, 그래도 안 되면 lite
   for (const [size, delegate] of [["full", "GPU"], ["full", "CPU"], ["lite", "CPU"]]) {
-    try { state.landmarker = await make(size, delegate); state.modelInfo = `${size}/${delegate}`; return; } catch {}
+    try { state.landmarker = await make(size, delegate); state.modelInfo = `포즈 ${size}/${delegate}`; break; } catch {}
   }
-  throw new Error("포즈 모델을 불러오지 못했어요");
+  if (!state.landmarker) throw new Error("포즈 모델을 불러오지 못했어요");
+
+  // 사람 전용 검출기: 여러 명/작은 사람을 포즈보다 잘 찾음. 실패해도 포즈만으로 동작.
+  const durl = (n) => `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite${n}/float16/1/efficientdet_lite${n}.tflite`;
+  for (const [n, delegate] of [[2, "GPU"], [2, "CPU"], [0, "CPU"]]) {
+    try {
+      state.detector = await ObjectDetector.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: durl(n), delegate },
+        runningMode: "VIDEO", scoreThreshold: 0.35, maxResults: 10, categoryAllowlist: ["person"],
+      });
+      state.modelInfo += ` + 검출 lite${n}/${delegate}`; return;
+    } catch {}
+  }
+  state.modelInfo += " (사람 검출기 로드 실패 → 포즈만 사용)";
 }
 
 // ---------- 안정화: 프레임 간 평활 + 순간 미검출 무시 ----------
-let prevPeople = [], lastSeen = 0;
-function smoothPeople(people, now) {
-  if (!people.length) {
-    if (prevPeople.length && now - lastSeen < 800) return prevPeople; // 0.8초 이내 끊김은 유지
-    prevPeople = []; return [];
+let prevEntries = [], lastSeen = 0;
+function stabilizeEntries(entries, now) {
+  if (!entries.length) {
+    if (prevEntries.length && now - lastSeen < 800) return prevEntries; // 0.8초 이내 끊김은 유지
+    prevEntries = []; return [];
   }
   lastSeen = now;
-  const a = 0.3; // 새 값 반영 비율(작을수록 부드러움)
-  const out = prevPeople.length === people.length
-    ? people.map((p, k) => p.map((pt, i) => { const q = prevPeople[k][i]; return { x: a * pt.x + (1 - a) * q.x, y: a * pt.y + (1 - a) * q.y, visibility: pt.visibility }; }))
-    : people;
-  prevPeople = out; return out;
+  prevEntries = smoothBoxes(prevEntries, entries, 0.3);
+  return prevEntries;
 }
 
 // ---------- 밝기(역광) ----------
@@ -152,7 +162,17 @@ function loop() {
   lastRun = now;
   const ts = Math.max(now, lastTs + 1); lastTs = ts;
   const res = state.landmarker.detectForVideo(video, ts);
-  const people = smoothPeople(res.landmarks || [], now);
+  const poseBoxes = (res.landmarks || []).map(personBox).filter(Boolean);
+  let dets = [];
+  if (state.detector) {
+    try {
+      const W = video.videoWidth, H = video.videoHeight;
+      dets = state.detector.detectForVideo(video, ts).detections
+        .filter((d) => d.categories?.[0]?.categoryName === "person" && d.boundingBox)
+        .map((d) => { const b = d.boundingBox; return { left: b.originX / W, top: b.originY / H, right: (b.originX + b.width) / W, bottom: (b.originY + b.height) / H, score: d.categories[0].score }; });
+    } catch {}
+  }
+  const people = stabilizeEntries(sortByX(mergePeople(poseBoxes, dets)), now);
 
   const margin = stab.isOk ? 0.05 : 0; // 좋아요 상태에서는 기준을 5%p 넓혀 경계에서 깜빡이지 않게
   const opts = { mode: $("mode").value, bg: $("bg").value, margin };
@@ -162,12 +182,12 @@ function loop() {
     if (first.box) luma = lumaStats(first.box);
   }
   const r = stab.update(evaluate(people, { ...opts, luma }), Date.now());
-  render(r, people);
+  render(r, people, res.landmarks || []);
   maybeSpeak(r.speak, Date.now());
 }
 
 const q5 = (v) => Math.round((v * 100) / 5) * 5; // 표시용: 5% 단위로 반올림해 숫자가 덜 흔들리게
-function render(r, people) {
+function render(r, people, poses) {
   banner.className = r.level;
   banner.textContent = r.level === "ok" ? "✔ 구도 좋아요" : r.issues[0];
   issuesEl.replaceChildren(...(r.level === "ok" ? [] : r.issues.slice(1, 3).map((t) => Object.assign(document.createElement("li"), { textContent: t }))));
@@ -184,7 +204,10 @@ function render(r, people) {
   ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke();
   ctx.fillStyle = "rgba(0,200,255,.9)";
-  for (const p of people) for (const pt of p) if ((pt.visibility ?? 1) >= 0.35) { ctx.beginPath(); ctx.arc(pt.x * W, pt.y * H, 5, 0, 6.283); ctx.fill(); }
+  for (const p of poses) for (const pt of p) if ((pt.visibility ?? 1) >= 0.35) { ctx.beginPath(); ctx.arc(pt.x * W, pt.y * H, 5, 0, 6.283); ctx.fill(); }
+  // 인식된 사람마다 얇은 박스 (몇 명이 잡혔는지 눈으로 확인용)
+  ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 2;
+  for (const p of people) ctx.strokeRect(p.left * W, p.top * H, (p.right - p.left) * W, (p.bottom - p.top) * H);
   if (r.box) {
     ctx.strokeStyle = r.level === "ok" ? "#2ecc71" : "#ff9f1a"; ctx.lineWidth = 6;
     const b = r.box;

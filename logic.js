@@ -15,6 +15,7 @@ export const BG_PRESETS = {
 // MediaPipe Pose 인덱스: 0 코, 1~6 눈, 7·8 귀, 9·10 입, 11·12 어깨,
 // 23·24 엉덩이, 27·28 발목, 29~32 발뒤꿈치/발끝
 export function personBox(lm) {
+  if (!Array.isArray(lm)) return lm; // 이미 계산된 박스(검출기/병합 결과)는 그대로 사용
   const ok = (i) => lm[i] && (lm[i].visibility ?? 1) >= VIS;
   const pts = lm.filter((p) => (p.visibility ?? 1) >= VIS);
   if (pts.length < 5) return null;
@@ -168,4 +169,57 @@ export class Stabilizer {
     else this.shown = { ...this.shown, metrics: raw.metrics, box: raw.box };
     return this.shown;
   }
+}
+
+
+// ---------- 포즈 박스 + 사람 검출기 박스 병합 ----------
+// 검출기(ObjectDetector)는 작거나 겹친 사람을 포즈보다 잘 찾고, 포즈는 머리/발 정보를 준다.
+const area = (b) => Math.max(0, b.right - b.left) * Math.max(0, b.bottom - b.top);
+function inter(a, b) {
+  return Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+}
+export function iou(a, b) {
+  const i = inter(a, b), u = area(a) + area(b) - i;
+  return u > 0 ? i / u : 0;
+}
+
+/** poseBoxes: personBox() 결과들, dets: {top,bottom,left,right,score} (0~1). */
+export function mergePeople(poseBoxes, dets) {
+  const out = [], used = new Set();
+  for (const d of [...dets].sort((x, y) => (y.score ?? 0) - (x.score ?? 0))) {
+    let best = -1, bestV = 0;
+    poseBoxes.forEach((p, i) => {
+      if (used.has(i)) return;
+      const cover = area(p) > 0 ? inter(d, p) / area(p) : 0;
+      if (cover >= 0.5 && iou(d, p) >= 0.25 && cover > bestV) { bestV = cover; best = i; }
+    });
+    if (best >= 0) {
+      used.add(best);
+      const p = poseBoxes[best];
+      out.push({
+        top: Math.min(d.top, p.top), bottom: Math.max(d.bottom, p.bottom),
+        left: Math.min(d.left, p.left), right: Math.max(d.right, p.right),
+        // 프레임 아래 끝에 닿았으면 잘린 것, 아니면(가려졌더라도) 프레임 때문에 잘린 건 아님
+        feetVisible: p.feetVisible || d.bottom <= 0.985,
+        feetY: p.feetVisible ? Math.max(p.feetY, d.bottom > 0.985 ? d.bottom : -Infinity) : d.bottom,
+        hipsVisible: p.hipsVisible || d.bottom <= 0.985,
+        source: "both",
+      });
+    } else {
+      out.push({ top: d.top, bottom: d.bottom, left: d.left, right: d.right, feetVisible: true, feetY: d.bottom, hipsVisible: true, source: "det" });
+    }
+  }
+  poseBoxes.forEach((p, i) => { if (!used.has(i)) out.push({ ...p, source: "pose" }); });
+  return out;
+}
+
+export const sortByX = (list) => [...list].sort((a, b) => a.left + a.right - (b.left + b.right));
+
+/** 같은 인원수일 때만 프레임 간 지수평활(좌→우로 정렬된 순서 기준). */
+export function smoothBoxes(prev, cur, a = 0.3) {
+  if (!prev || prev.length !== cur.length) return cur;
+  return cur.map((c, i) => {
+    const p = prev[i], mix = (k) => (Number.isFinite(p[k]) && Number.isFinite(c[k]) ? a * c[k] + (1 - a) * p[k] : c[k]);
+    return { ...c, top: mix("top"), bottom: mix("bottom"), left: mix("left"), right: mix("right"), feetY: mix("feetY") };
+  });
 }

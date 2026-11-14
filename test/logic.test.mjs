@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, Stabilizer } from "../logic.js";
+import { evaluate, Stabilizer, mergePeople, personBox, sortByX, smoothBoxes } from "../logic.js";
 
 // 서 있는 사람 하나를 만든다: 머리 y=top, 발 y=bottom, 가운데 x=cx
 function person({ top, bottom, cx = 0.5, halfW = 0.08, vis = 1 }) {
@@ -112,4 +112,43 @@ test("Stabilizer: 경고→OK는 1초 이상 계속 좋아야 전환", () => {
   assert.equal(st.update(ok, 100).level, "warn");
   assert.equal(st.update(ok, 900).level, "warn");
   assert.equal(st.update(ok, 1200).level, "ok");
+});
+
+const det = (l, t, r, b, score = 0.8) => ({ left: l, top: t, right: r, bottom: b, score });
+
+test("병합: 포즈가 1명만 잡아도 검출기가 찾은 2번째 사람이 포함됨", () => {
+  const pose = personBox(person({ top: 0.2, bottom: 0.8, cx: 0.3 }));
+  const merged = mergePeople([pose], [det(0.2, 0.15, 0.4, 0.82), det(0.6, 0.25, 0.8, 0.8)]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged.map((m) => m.source).sort(), ["both", "det"]);
+  const r = evaluate(merged, { mode: "full", bg: "normal" });
+  assert.equal(r.metrics.people, 2);
+});
+
+test("병합: 검출 박스만 있는 사람의 옆 잘림(오른쪽 끝)도 판정", () => {
+  const merged = mergePeople([], [det(0.2, 0.2, 0.4, 0.8), det(0.85, 0.2, 1.0, 0.8)]);
+  const r = evaluate(merged, { mode: "full", bg: "normal" });
+  assert.ok(r.issues.some((t) => t.includes("오른쪽 끝 사람이 잘려요")), JSON.stringify(r.issues));
+});
+
+test("병합: 포즈에서 발이 안 잡혀도 검출 박스가 화면 안이면 '발' 경고 없음", () => {
+  const p = person({ top: 0.15, bottom: 0.82 });
+  for (const i of [27, 28, 29, 30, 31, 32]) p[i].visibility = 0.1;
+  const merged = mergePeople([personBox(p)], [det(0.4, 0.12, 0.6, 0.85)]);
+  const r = evaluate(merged, { mode: "full", bg: "normal" });
+  assert.ok(!r.issues.some((t) => t.includes("발")), JSON.stringify(r.issues));
+});
+
+test("병합: 검출 박스가 아래 끝에 닿으면 발 잘림", () => {
+  const merged = mergePeople([], [det(0.4, 0.3, 0.6, 1.0)]);
+  const r = evaluate(merged, { mode: "full", bg: "normal" });
+  assert.ok(r.issues.some((t) => t.includes("발")));
+});
+
+test("정렬/평활: 같은 인원이면 평활, 다르면 새 값", () => {
+  const a = sortByX([det(0.6, 0.2, 0.8, 0.8), det(0.1, 0.2, 0.3, 0.8)]);
+  assert.ok(a[0].left < a[1].left);
+  const s = smoothBoxes(a, a.map((x) => ({ ...x, top: x.top + 0.1 })));
+  assert.ok(s[0].top > a[0].top && s[0].top < a[0].top + 0.1);
+  assert.equal(smoothBoxes(a, [a[0]]).length, 1);
 });
